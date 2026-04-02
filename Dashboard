@@ -1,0 +1,584 @@
+"""
+sensr.IT — Dashboard HTML Generator
+Gera o dashboard HTML/JS completo com todos os dados processados.
+"""
+
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+
+logger = logging.getLogger("DashboardGenerator")
+
+
+class DashboardGenerator:
+    def __init__(self, output_dir: str = "dashboard"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+
+    def generate(self, data: dict, ai_insights: dict = None) -> str:
+        t = data.get("tickets", {})
+        p = data.get("projects", {})
+        s = data.get("sla", {})
+        k = data.get("kpis", {})
+        timeline = data.get("timeline", {})
+        ai = ai_insights or {}
+
+        tickets_json = json.dumps(t, ensure_ascii=False)
+        projects_json = json.dumps(p, ensure_ascii=False)
+        sla_json = json.dumps(s, ensure_ascii=False)
+        kpis_json = json.dumps(k, ensure_ascii=False)
+        timeline_json = json.dumps(timeline, ensure_ascii=False)
+        ai_json = json.dumps(ai, ensure_ascii=False)
+
+        sla_pct = s.get("overall", {}).get("compliance_pct", 0)
+        sla_color = "#22c55e" if sla_pct >= 90 else "#f97316" if sla_pct >= 75 else "#ef4444"
+
+        html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sensr.IT — ITSM Intelligence Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root {{
+    --bg: #0f172a; --surface: #1e293b; --surface2: #273549;
+    --border: #334155; --blue: #3b82f6; --blue-light: #60a5fa;
+    --green: #22c55e; --orange: #f97316; --red: #ef4444;
+    --purple: #a855f7; --text: #f1f5f9; --muted: #94a3b8;
+  }}
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ font-family:'Segoe UI',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }}
+
+  /* HEADER */
+  .header {{ background:linear-gradient(135deg,#1e3a5f,#0f172a); border-bottom:1px solid #1e40af; padding:0 32px; height:64px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; }}
+  .header-left {{ display:flex; align-items:center; gap:16px; }}
+  .logo {{ font-size:1.3rem; font-weight:700; color:var(--blue-light); }}
+  .logo span {{ color:var(--text); }}
+  .badge {{ background:#1e40af; color:#93c5fd; padding:4px 10px; border-radius:20px; font-size:0.72rem; border:1px solid #3b82f6; }}
+  .updated {{ color:var(--muted); font-size:0.78rem; }}
+
+  /* NAV TABS */
+  .tabs {{ display:flex; gap:4px; background:var(--surface2); padding:4px; border-radius:10px; margin:24px 32px 0; }}
+  .tab {{ padding:10px 20px; border-radius:7px; cursor:pointer; font-size:0.85rem; color:var(--muted); border:none; background:transparent; transition:all .2s; }}
+  .tab.active {{ background:var(--blue); color:#fff; font-weight:500; }}
+  .tab:hover:not(.active) {{ background:var(--surface); color:var(--text); }}
+
+  /* LAYOUT */
+  .container {{ padding:24px 32px; }}
+  .page {{ display:none; }}
+  .page.active {{ display:block; }}
+  .grid-4 {{ display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }}
+  .grid-3 {{ display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:24px; }}
+  .grid-2 {{ display:grid; grid-template-columns:repeat(2,1fr); gap:16px; margin-bottom:24px; }}
+  .grid-2-1 {{ display:grid; grid-template-columns:2fr 1fr; gap:16px; margin-bottom:24px; }}
+  .grid-1-2 {{ display:grid; grid-template-columns:1fr 2fr; gap:16px; margin-bottom:24px; }}
+
+  /* CARDS */
+  .card {{ background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; }}
+  .card-header {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border); }}
+  .card-title {{ font-size:0.88rem; font-weight:500; color:var(--blue-light); }}
+
+  /* KPI CARDS */
+  .kpi {{ background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; }}
+  .kpi-label {{ font-size:0.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }}
+  .kpi-value {{ font-size:2rem; font-weight:700; }}
+  .kpi-sub {{ font-size:0.75rem; color:var(--muted); margin-top:4px; }}
+  .kpi-icon {{ font-size:1.5rem; margin-bottom:8px; }}
+
+  /* BADGES */
+  .pill {{ display:inline-block; padding:3px 9px; border-radius:20px; font-size:0.72rem; font-weight:500; }}
+  .pill-red {{ background:#450a0a; color:#f87171; border:1px solid #991b1b; }}
+  .pill-orange {{ background:#431407; color:#fb923c; border:1px solid #9a3412; }}
+  .pill-yellow {{ background:#422006; color:#fbbf24; border:1px solid #92400e; }}
+  .pill-green {{ background:#052e16; color:#4ade80; border:1px solid #166534; }}
+  .pill-blue {{ background:#1e3a5f; color:#93c5fd; border:1px solid #1e40af; }}
+  .pill-purple {{ background:#3b0764; color:#d8b4fe; border:1px solid #7e22ce; }}
+
+  /* TABLE */
+  .table-wrap {{ overflow-x:auto; }}
+  table {{ width:100%; border-collapse:collapse; font-size:0.82rem; }}
+  th {{ color:var(--muted); font-weight:500; padding:10px 12px; text-align:left; border-bottom:1px solid var(--border); font-size:0.75rem; text-transform:uppercase; letter-spacing:.5px; }}
+  td {{ padding:10px 12px; border-bottom:1px solid var(--border); color:var(--text); }}
+  tr:hover td {{ background:var(--surface2); }}
+  tr:last-child td {{ border-bottom:none; }}
+
+  /* PROGRESS BAR */
+  .progress-bar {{ height:6px; background:var(--border); border-radius:4px; overflow:hidden; margin-top:6px; }}
+  .progress-fill {{ height:100%; border-radius:4px; transition:width .5s; }}
+
+  /* AI INSIGHTS */
+  .insight-item {{ display:flex; gap:12px; padding:12px; background:var(--surface2); border-radius:8px; margin-bottom:8px; border-left:3px solid var(--blue); }}
+  .insight-icon {{ font-size:1rem; flex-shrink:0; }}
+  .insight-text {{ font-size:0.85rem; color:#bfdbfe; line-height:1.5; }}
+  .rec-item {{ padding:12px 14px; border-radius:8px; margin-bottom:8px; }}
+  .rec-urgent {{ background:#450a0a; border-left:3px solid var(--red); }}
+  .rec-high {{ background:#431407; border-left:3px solid var(--orange); }}
+  .rec-medium {{ background:#1e3a5f; border-left:3px solid var(--blue); }}
+  .rec-low {{ background:#052e16; border-left:3px solid var(--green); }}
+  .rec-label {{ font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px; }}
+  .rec-text {{ font-size:0.83rem; }}
+
+  /* SLA METER */
+  .sla-ring {{ text-align:center; padding:16px; }}
+  .sla-number {{ font-size:2.5rem; font-weight:700; }}
+  .sla-label {{ font-size:0.75rem; color:var(--muted); }}
+
+  /* CHART CONTAINER */
+  .chart-wrap {{ position:relative; height:220px; }}
+  .chart-wrap-sm {{ position:relative; height:180px; }}
+  .chart-wrap-lg {{ position:relative; height:280px; }}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">sensr<span>.IT</span></div>
+    <span class="badge">🤖 ITSM Intelligence</span>
+    <span class="badge">🦜 LangChain AI</span>
+  </div>
+  <div class="updated">Atualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}</div>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="showPage('overview')">📊 Visão Geral</button>
+  <button class="tab" onclick="showPage('tickets')">🎫 Tickets & Service</button>
+  <button class="tab" onclick="showPage('projects')">📁 Projetos</button>
+  <button class="tab" onclick="showPage('sla')">⏱️ SLA</button>
+  <button class="tab" onclick="showPage('ai')">🤖 IA & Insights</button>
+</div>
+
+<div class="container">
+
+<!-- ══════════════ OVERVIEW ══════════════ -->
+<div id="page-overview" class="page active">
+  <div class="grid-4">
+    <div class="kpi">
+      <div class="kpi-icon">🎫</div>
+      <div class="kpi-label">Total de Tickets</div>
+      <div class="kpi-value" id="kpi-total-tickets" style="color:var(--blue-light)">—</div>
+      <div class="kpi-sub" id="kpi-open-tickets">— em aberto</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-icon">📁</div>
+      <div class="kpi-label">Projetos Ativos</div>
+      <div class="kpi-value" id="kpi-active-projects" style="color:var(--purple)">—</div>
+      <div class="kpi-sub" id="kpi-completed-projects">— concluídos</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-icon">⏱️</div>
+      <div class="kpi-label">SLA Geral</div>
+      <div class="kpi-value" id="kpi-sla" style="color:{sla_color}">—</div>
+      <div class="kpi-sub">meta: 90%</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-icon">⭐</div>
+      <div class="kpi-label">Satisfação Média</div>
+      <div class="kpi-value" id="kpi-satisfaction" style="color:var(--green)">—</div>
+      <div class="kpi-sub">escala 1–5</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header"><span class="card-title">📈 Tickets — Últimos 14 dias</span></div>
+      <div class="chart-wrap"><canvas id="chart-timeline"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">🎯 Distribuição por Prioridade</span></div>
+      <div class="chart-wrap"><canvas id="chart-priority-overview"></canvas></div>
+    </div>
+  </div>
+
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-header"><span class="card-title">📊 Status dos Projetos</span></div>
+      <div class="chart-wrap-sm"><canvas id="chart-proj-status-overview"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">⏱️ SLA por Prioridade</span></div>
+      <div id="sla-bars-overview"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">🤖 Alertas IA</span></div>
+      <div id="ai-alerts-overview"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ TICKETS ══════════════ -->
+<div id="page-tickets" class="page">
+  <div class="grid-4">
+    <div class="kpi">
+      <div class="kpi-label">Abertos</div>
+      <div class="kpi-value" id="t-open" style="color:var(--orange)">—</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Críticos</div>
+      <div class="kpi-value" id="t-critical" style="color:var(--red)">—</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Tempo Médio Resolução</div>
+      <div class="kpi-value" id="t-avg-res" style="color:var(--blue-light)">—</div>
+      <div class="kpi-sub">horas</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Taxa de Reabertura</div>
+      <div class="kpi-value" id="t-reopen" style="color:var(--purple)">—</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header"><span class="card-title">📂 Tickets por Categoria</span></div>
+      <div class="chart-wrap-lg"><canvas id="chart-category"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">👤 Tickets por Agente</span></div>
+      <div class="chart-wrap-lg"><canvas id="chart-agent"></canvas></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">🎫 Últimos Chamados</span></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Título</th><th>Categoria</th><th>Prioridade</th><th>Status</th><th>Agente</th><th>Abertura</th></tr></thead>
+        <tbody id="tickets-table"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ PROJETOS ══════════════ -->
+<div id="page-projects" class="page">
+  <div class="grid-4">
+    <div class="kpi">
+      <div class="kpi-label">Em Execução</div>
+      <div class="kpi-value" id="p-active" style="color:var(--blue-light)">—</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Concluídos</div>
+      <div class="kpi-value" id="p-completed" style="color:var(--green)">—</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Em Risco</div>
+      <div class="kpi-value" id="p-risk" style="color:var(--red)">—</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Variação Orçamento</div>
+      <div class="kpi-value" id="p-budget" style="color:var(--orange)">—</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header"><span class="card-title">📊 Status dos Projetos</span></div>
+      <div class="chart-wrap"><canvas id="chart-proj-status"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">⚠️ Nível de Risco</span></div>
+      <div class="chart-wrap"><canvas id="chart-proj-risk"></canvas></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">📁 Todos os Projetos</span></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Nome</th><th>Status</th><th>Progresso</th><th>Orçamento</th><th>Variação</th><th>Risco</th><th>Gerente</th></tr></thead>
+        <tbody id="projects-table"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ SLA ══════════════ -->
+<div id="page-sla" class="page">
+  <div class="grid-4">
+    <div class="kpi">
+      <div class="kpi-label">Conformidade Geral</div>
+      <div class="kpi-value" id="sla-overall" style="color:{sla_color}">—</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Tickets no Período</div>
+      <div class="kpi-value" id="sla-total" style="color:var(--blue-light)">—</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">SLA Violado</div>
+      <div class="kpi-value" id="sla-breached" style="color:var(--red)">—</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">SLA Crítica</div>
+      <div class="kpi-value" id="sla-critical" style="color:var(--green)">—</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header"><span class="card-title">⏱️ SLA por Prioridade</span></div>
+      <div class="chart-wrap-lg"><canvas id="chart-sla-priority"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">📂 SLA por Categoria</span></div>
+      <div class="chart-wrap-lg"><canvas id="chart-sla-category"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ AI INSIGHTS ══════════════ -->
+<div id="page-ai" class="page">
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-header"><span class="card-title">🎫 Análise de Tickets</span></div>
+      <div id="ai-tickets-insights"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">📁 Análise de Projetos</span></div>
+      <div id="ai-projects-insights"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">⏱️ Análise de SLA</span></div>
+      <div id="ai-sla-insights"></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="card-title">🎯 Recomendações Estratégicas — Geradas pelo Agente LangChain</span></div>
+    <div id="ai-recommendations"></div>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<script>
+const TICKETS = {tickets_json};
+const PROJECTS = {projects_json};
+const SLA = {sla_json};
+const KPIS = {kpis_json};
+const TIMELINE = {timeline_json};
+const AI = {ai_json};
+
+const COLORS = {{
+  blue:'#3b82f6', green:'#22c55e', orange:'#f97316',
+  red:'#ef4444', purple:'#a855f7', yellow:'#eab308',
+  teal:'#14b8a6', pink:'#ec4899'
+}};
+const CHART_COLORS = Object.values(COLORS);
+
+function showPage(name) {{
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-'+name).classList.add('active');
+  event.target.classList.add('active');
+}}
+
+function priorityPill(p) {{
+  const map = {{'Crítica':'pill-red','Alta':'pill-orange','Média':'pill-yellow','Baixa':'pill-green'}};
+  return `<span class="pill ${{map[p]||'pill-blue'}}">${{p}}</span>`;
+}}
+
+function statusPill(s) {{
+  const map = {{'Aberto':'pill-orange','Em Andamento':'pill-blue','Resolvido':'pill-green','Fechado':'pill-green','Aguardando Usuário':'pill-yellow','Em Execução':'pill-blue','Concluído':'pill-green','Planejamento':'pill-purple','Pausado':'pill-yellow','Em Revisão':'pill-blue'}};
+  return `<span class="pill ${{map[s]||'pill-blue'}}">${{s}}</span>`;
+}}
+
+function riskPill(r) {{
+  const map = {{'Alto':'pill-red','Médio':'pill-orange','Baixo':'pill-green'}};
+  return `<span class="pill ${{map[r]||'pill-blue'}}">${{r}}</span>`;
+}}
+
+function makeChart(id, type, labels, datasets, opts={{}}) {{
+  const ctx = document.getElementById(id);
+  if(!ctx) return;
+  return new Chart(ctx, {{
+    type, data:{{labels, datasets}},
+    options:{{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{{legend:{{labels:{{color:'#94a3b8',font:{{size:11}}}}}}}},
+      scales: type==='bar'||type==='line' ? {{
+        x:{{ticks:{{color:'#94a3b8',font:{{size:10}}}},grid:{{color:'#1e293b'}}}},
+        y:{{ticks:{{color:'#94a3b8',font:{{size:10}}}},grid:{{color:'#334155'}}}}
+      }} : undefined,
+      ...opts
+    }}
+  }});
+}}
+
+function init() {{
+  // KPIs Overview
+  document.getElementById('kpi-total-tickets').textContent = TICKETS.total?.toLocaleString('pt-BR') || '—';
+  document.getElementById('kpi-open-tickets').textContent = (TICKETS.open||0) + ' em aberto';
+  document.getElementById('kpi-active-projects').textContent = PROJECTS.active || '—';
+  document.getElementById('kpi-completed-projects').textContent = (PROJECTS.completed||0) + ' concluídos';
+  document.getElementById('kpi-sla').textContent = (SLA.overall?.compliance_pct||0) + '%';
+  document.getElementById('kpi-satisfaction').textContent = (TICKETS.avg_satisfaction||0).toFixed(1);
+
+  // Timeline Chart
+  makeChart('chart-timeline','line',TIMELINE.labels,[
+    {{label:'Abertos',data:TIMELINE.created,borderColor:COLORS.orange,backgroundColor:'rgba(249,115,22,0.1)',tension:.4,fill:true}},
+    {{label:'Resolvidos',data:TIMELINE.resolved,borderColor:COLORS.green,backgroundColor:'rgba(34,197,94,0.1)',tension:.4,fill:true}},
+  ]);
+
+  // Priority Overview
+  const byPrio = TICKETS.by_priority||{{}};
+  makeChart('chart-priority-overview','doughnut',Object.keys(byPrio),[{{
+    data:Object.values(byPrio),
+    backgroundColor:[COLORS.red,COLORS.orange,COLORS.yellow,COLORS.green],
+    borderWidth:0
+  }}]);
+
+  // Project Status Overview
+  const byStatus = PROJECTS.by_status||{{}};
+  makeChart('chart-proj-status-overview','doughnut',Object.keys(byStatus),[{{
+    data:Object.values(byStatus),
+    backgroundColor:CHART_COLORS,borderWidth:0
+  }}]);
+
+  // SLA bars overview
+  const slaBarsEl = document.getElementById('sla-bars-overview');
+  if(slaBarsEl && SLA.by_priority) {{
+    slaBarsEl.innerHTML = Object.entries(SLA.by_priority).map(([p,v])=>{{
+      const color = v.compliance_pct>=90?'#22c55e':v.compliance_pct>=75?'#f97316':'#ef4444';
+      return `<div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-size:.8rem;margin-bottom:4px">
+          <span>${{p}}</span><span style="color:${{color}};font-weight:500">${{v.compliance_pct}}%</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" style="width:${{v.compliance_pct}}%;background:${{color}}"></div></div>
+      </div>`;
+    }}).join('');
+  }}
+
+  // AI Alerts
+  const alertsEl = document.getElementById('ai-alerts-overview');
+  if(alertsEl && AI.tickets?.insights) {{
+    alertsEl.innerHTML = AI.tickets.insights.slice(0,4).map(i=>
+      `<div class="insight-item"><span class="insight-icon">💡</span><span class="insight-text">${{i}}</span></div>`
+    ).join('');
+  }}
+
+  // ── TICKETS PAGE ──
+  document.getElementById('t-open').textContent = TICKETS.open||'—';
+  document.getElementById('t-critical').textContent = TICKETS.critical_open||'—';
+  document.getElementById('t-avg-res').textContent = (TICKETS.avg_resolution_hours||0)+'h';
+  document.getElementById('t-reopen').textContent = (TICKETS.reopen_rate_pct||0)+'%';
+
+  const byCat = TICKETS.by_category||{{}};
+  makeChart('chart-category','bar',Object.keys(byCat),[{{
+    label:'Tickets',data:Object.values(byCat),
+    backgroundColor:COLORS.blue,borderRadius:4,borderSkipped:false
+  }}],{{indexAxis:'y'}});
+
+  const byAgent = TICKETS.by_agent||{{}};
+  makeChart('chart-agent','bar',Object.keys(byAgent),[{{
+    label:'Tickets',data:Object.values(byAgent),
+    backgroundColor:COLORS.purple,borderRadius:4,borderSkipped:false
+  }}],{{indexAxis:'y'}});
+
+  // Tickets table
+  const tbody = document.getElementById('tickets-table');
+  if(tbody && TICKETS.raw) {{
+    tbody.innerHTML = TICKETS.raw.slice(0,20).map(t=>{{
+      const date = t.created_at?.substring(0,10)||'';
+      return `<tr>
+        <td style="font-family:monospace;color:var(--blue-light)">${{t.id}}</td>
+        <td>${{t.title}}</td>
+        <td><span class="pill pill-blue">${{t.category}}</span></td>
+        <td>${{priorityPill(t.priority)}}</td>
+        <td>${{statusPill(t.status)}}</td>
+        <td>${{t.agent}}</td>
+        <td style="color:var(--muted)">${{date}}</td>
+      </tr>`;
+    }}).join('');
+  }}
+
+  // ── PROJECTS PAGE ──
+  document.getElementById('p-active').textContent = PROJECTS.active||'—';
+  document.getElementById('p-completed').textContent = PROJECTS.completed||'—';
+  document.getElementById('p-risk').textContent = PROJECTS.at_risk||'—';
+  const bv = PROJECTS.budget_variance_pct||0;
+  document.getElementById('p-budget').textContent = (bv>0?'+':'')+bv+'%';
+
+  const pByStatus = PROJECTS.by_status||{{}};
+  makeChart('chart-proj-status','doughnut',Object.keys(pByStatus),[{{
+    data:Object.values(pByStatus),backgroundColor:CHART_COLORS,borderWidth:0
+  }}]);
+
+  const pByRisk = PROJECTS.by_risk||{{}};
+  makeChart('chart-proj-risk','doughnut',Object.keys(pByRisk),[{{
+    data:Object.values(pByRisk),
+    backgroundColor:[COLORS.green,COLORS.orange,COLORS.red],borderWidth:0
+  }}]);
+
+  // Projects table
+  const ptbody = document.getElementById('projects-table');
+  if(ptbody && PROJECTS.raw) {{
+    ptbody.innerHTML = PROJECTS.raw.map(p=>{{
+      const bcolor = p.budget_variance_pct>10?'var(--red)':p.budget_variance_pct>0?'var(--orange)':'var(--green)';
+      return `<tr>
+        <td style="font-family:monospace;color:var(--blue-light)">${{p.id}}</td>
+        <td style="max-width:200px">${{p.name}}</td>
+        <td>${{statusPill(p.status)}}</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="progress-bar" style="width:80px;height:8px"><div class="progress-fill" style="width:${{p.progress_pct}}%;background:var(--blue)"></div></div>
+            <span style="font-size:.8rem">${{p.progress_pct}}%</span>
+          </div>
+        </td>
+        <td>R$ ${{(p.budget_planned/1000).toFixed(0)}}k</td>
+        <td style="color:${{bcolor}};font-weight:500">${{p.budget_variance_pct>0?'+':''}}${{p.budget_variance_pct}}%</td>
+        <td>${{riskPill(p.risks)}}</td>
+        <td style="color:var(--muted)">${{p.manager}}</td>
+      </tr>`;
+    }}).join('');
+  }}
+
+  // ── SLA PAGE ──
+  document.getElementById('sla-overall').textContent = (SLA.overall?.compliance_pct||0)+'%';
+  document.getElementById('sla-total').textContent = SLA.overall?.total_tickets||'—';
+  document.getElementById('sla-breached').textContent = SLA.overall?.sla_breached||'—';
+  document.getElementById('sla-critical').textContent = (SLA.by_priority?.['Crítica']?.compliance_pct||0)+'%';
+
+  const slaP = SLA.by_priority||{{}};
+  makeChart('chart-sla-priority','bar',Object.keys(slaP),[
+    {{label:'Conformidade %',data:Object.values(slaP).map(v=>v.compliance_pct),backgroundColor:Object.values(slaP).map(v=>v.compliance_pct>=90?COLORS.green:v.compliance_pct>=75?COLORS.orange:COLORS.red),borderRadius:4,borderSkipped:false}},
+  ]);
+
+  const slaC = SLA.by_category||{{}};
+  makeChart('chart-sla-category','bar',Object.keys(slaC),[
+    {{label:'Conformidade %',data:Object.values(slaC).map(v=>v.compliance_pct),backgroundColor:COLORS.teal,borderRadius:4,borderSkipped:false}},
+  ],{{indexAxis:'y'}});
+
+  // ── AI PAGE ──
+  const renderInsights = (el, insights) => {{
+    if(!el||!insights) return;
+    el.innerHTML = insights.map(i=>
+      `<div class="insight-item"><span class="insight-icon">💡</span><span class="insight-text">${{i}}</span></div>`
+    ).join('');
+  }};
+  renderInsights(document.getElementById('ai-tickets-insights'), AI.tickets?.insights);
+  renderInsights(document.getElementById('ai-projects-insights'), AI.projects?.insights);
+  renderInsights(document.getElementById('ai-sla-insights'), AI.sla?.insights);
+
+  const recEl = document.getElementById('ai-recommendations');
+  if(recEl && AI.recommendations?.recommendations) {{
+    recEl.innerHTML = AI.recommendations.recommendations.map(r=>{{
+      const cls = r.priority==='URGENTE'?'rec-urgent':r.priority==='ALTA'?'rec-high':r.priority==='MÉDIA'?'rec-medium':'rec-low';
+      const color = r.priority==='URGENTE'?'#f87171':r.priority==='ALTA'?'#fb923c':r.priority==='MÉDIA'?'#93c5fd':'#4ade80';
+      return `<div class="rec-item ${{cls}}">
+        <div class="rec-label" style="color:${{color}}">${{r.priority}} — ${{r.area}}</div>
+        <div class="rec-text">${{r.action}}</div>
+      </div>`;
+    }}).join('');
+  }}
+}}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body></html>"""
+
+        path = self.output_dir / "index.html"
+        path.write_text(html, encoding="utf-8")
+        logger.info(f"[DashboardGenerator] ✅ Dashboard gerado: {path}")
+        return str(path)
