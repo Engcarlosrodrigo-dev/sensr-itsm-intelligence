@@ -1,0 +1,340 @@
+"""
+sensr.IT API Client
+Consome a API REST da plataforma ITSM sensr.IT.
+Em modo mock gera dados realistas para desenvolvimento e portfólio.
+"""
+
+import json
+import logging
+import random
+from datetime import datetime, timedelta
+from typing import Optional
+
+logger = logging.getLogger("SensrAPIClient")
+
+
+class SensrAPIClient:
+    """
+    Cliente oficial da API sensr.IT.
+
+    Endpoints suportados:
+    - GET /tickets          → Lista de chamados de suporte
+    - GET /tickets/{id}     → Detalhe de um chamado
+    - GET /projects         → Lista de projetos
+    - GET /projects/{id}    → Detalhe de um projeto
+    - GET /sla              → Relatório de SLA
+    - GET /kpis             → KPIs gerenciais consolidados
+    - GET /categories       → Categorias de chamados
+    - GET /agents           → Agentes/atendentes disponíveis
+
+    Em produção: configure BASE_URL e API_KEY via variáveis de ambiente.
+    Em desenvolvimento: usa MockDataGenerator automaticamente.
+    """
+
+    def __init__(self, base_url: str = None, api_key: str = None, mock: bool = True):
+        self.base_url = base_url or "https://api.sensr.it/v1"
+        self.api_key = api_key
+        self.mock = mock
+        self.generator = MockDataGenerator()
+        mode = "MOCK" if mock else "PRODUÇÃO"
+        logger.info(f"[SensrAPIClient] Inicializado | Modo: {mode} | URL: {self.base_url}")
+
+    def get_tickets(self, status: str = None, category: str = None,
+                    priority: str = None, limit: int = 200) -> list:
+        """Retorna lista de chamados de suporte."""
+        if self.mock:
+            tickets = self.generator.generate_tickets(limit)
+            if status:
+                tickets = [t for t in tickets if t["status"] == status]
+            if priority:
+                tickets = [t for t in tickets if t["priority"] == priority]
+            logger.info(f"[SensrAPIClient] GET /tickets → {len(tickets)} chamados")
+            return tickets
+        # Produção: implementar requests.get(...)
+        raise NotImplementedError("Modo produção: configure BASE_URL e API_KEY")
+
+    def get_ticket(self, ticket_id: str) -> dict:
+        """Retorna detalhe de um chamado específico."""
+        if self.mock:
+            tickets = self.generator.generate_tickets(1)
+            tickets[0]["id"] = ticket_id
+            return tickets[0]
+        raise NotImplementedError
+
+    def get_projects(self, status: str = None, limit: int = 50) -> list:
+        """Retorna lista de projetos."""
+        if self.mock:
+            projects = self.generator.generate_projects(limit)
+            if status:
+                projects = [p for p in projects if p["status"] == status]
+            logger.info(f"[SensrAPIClient] GET /projects → {len(projects)} projetos")
+            return projects
+        raise NotImplementedError
+
+    def get_sla_report(self, period_days: int = 30) -> dict:
+        """Retorna relatório consolidado de SLA."""
+        if self.mock:
+            report = self.generator.generate_sla_report(period_days)
+            logger.info(f"[SensrAPIClient] GET /sla → período: {period_days} dias")
+            return report
+        raise NotImplementedError
+
+    def get_kpis(self) -> dict:
+        """Retorna KPIs gerenciais consolidados."""
+        if self.mock:
+            kpis = self.generator.generate_kpis()
+            logger.info(f"[SensrAPIClient] GET /kpis → {len(kpis)} métricas")
+            return kpis
+        raise NotImplementedError
+
+    def get_categories(self) -> list:
+        """Retorna categorias de chamados."""
+        return MockDataGenerator.CATEGORIES
+
+    def get_agents(self) -> list:
+        """Retorna agentes/atendentes."""
+        return MockDataGenerator.AGENTS
+
+
+class MockDataGenerator:
+    """Gera dados mock realistas simulando a API sensr.IT."""
+
+    CATEGORIES = [
+        "Infraestrutura", "Acesso e Permissões", "Hardware",
+        "Software", "Rede", "Email", "Backup", "Segurança",
+        "Impressoras", "Telefonia"
+    ]
+
+    PRIORITIES = ["Crítica", "Alta", "Média", "Baixa"]
+    PRIORITY_WEIGHTS = [0.05, 0.20, 0.50, 0.25]
+
+    STATUSES_TICKET = ["Aberto", "Em Andamento", "Aguardando Usuário", "Resolvido", "Fechado"]
+    STATUS_WEIGHTS = [0.15, 0.20, 0.10, 0.30, 0.25]
+
+    STATUSES_PROJECT = ["Planejamento", "Em Execução", "Em Revisão", "Concluído", "Pausado"]
+
+    AGENTS = [
+        {"id": "A001", "name": "Carlos Silva", "team": "N1"},
+        {"id": "A002", "name": "Ana Souza", "team": "N1"},
+        {"id": "A003", "name": "Pedro Lima", "team": "N2"},
+        {"id": "A004", "name": "Juliana Costa", "team": "N2"},
+        {"id": "A005", "name": "Rafael Mendes", "team": "N3"},
+        {"id": "A006", "name": "Fernanda Rocha", "team": "N3"},
+    ]
+
+    REQUESTERS = [
+        "João Alves", "Maria Fernandes", "Lucas Pereira", "Camila Torres",
+        "Roberto Gomes", "Patricia Nunes", "André Carvalho", "Beatriz Lima",
+        "Thiago Martins", "Vanessa Oliveira", "Felipe Santos", "Larissa Moura",
+    ]
+
+    SLA_BY_PRIORITY = {
+        "Crítica":  {"response_hours": 1,  "resolution_hours": 4},
+        "Alta":     {"response_hours": 4,  "resolution_hours": 8},
+        "Média":    {"response_hours": 8,  "resolution_hours": 24},
+        "Baixa":    {"response_hours": 24, "resolution_hours": 72},
+    }
+
+    TICKET_TITLES = {
+        "Infraestrutura": ["Servidor fora do ar", "Disco cheio no servidor", "CPU com alta utilização"],
+        "Acesso e Permissões": ["Sem acesso ao sistema", "Redefinição de senha", "Permissão negada no diretório"],
+        "Hardware": ["Monitor com defeito", "Teclado não funciona", "Computador não liga"],
+        "Software": ["Erro ao abrir aplicativo", "Atualização necessária", "Licença expirada"],
+        "Rede": ["Sem acesso à internet", "VPN não conecta", "Rede lenta"],
+        "Email": ["Caixa de entrada cheia", "Erro ao enviar e-mail", "Conta bloqueada"],
+        "Backup": ["Falha no backup noturno", "Restauração de arquivo", "Backup incompleto"],
+        "Segurança": ["Suspeita de vírus", "Acesso indevido detectado", "Phishing reportado"],
+        "Impressoras": ["Impressora offline", "Papel encravado", "Toner acabou"],
+        "Telefonia": ["Ramal sem sinal", "Voicemail cheio", "Conferência não funciona"],
+    }
+
+    PROJECT_NAMES = [
+        "Migração para Cloud Azure", "Implantação do ERP SAP",
+        "Upgrade da Infraestrutura de Rede", "Implementação de MFA",
+        "Modernização do Data Center", "Projeto de Disaster Recovery",
+        "Implantação de SIEM", "Migração de Servidores On-premise",
+        "Renovação de Licenças Microsoft", "Deploy de MDM Corporativo",
+        "Projeto de Segurança Zero Trust", "Automação de Processos RPA",
+    ]
+
+    def generate_tickets(self, n: int = 200) -> list:
+        tickets = []
+        now = datetime.now()
+        random.seed(42)
+
+        for i in range(1, n + 1):
+            category = random.choice(self.CATEGORIES)
+            priority = random.choices(self.PRIORITIES, weights=self.PRIORITY_WEIGHTS)[0]
+            status = random.choices(self.STATUSES_TICKET, weights=self.STATUS_WEIGHTS)[0]
+            agent = random.choice(self.AGENTS)
+            requester = random.choice(self.REQUESTERS)
+            sla = self.SLA_BY_PRIORITY[priority]
+
+            created_at = now - timedelta(
+                days=random.randint(0, 30),
+                hours=random.randint(0, 23),
+                minutes=random.randint(0, 59)
+            )
+
+            # Tempo de primeira resposta
+            response_time_h = random.uniform(0.5, sla["response_hours"] * 1.5)
+            responded_at = created_at + timedelta(hours=response_time_h)
+
+            # Tempo de resolução (só se resolvido/fechado)
+            resolved_at = None
+            resolution_time_h = None
+            sla_met = None
+
+            if status in ["Resolvido", "Fechado"]:
+                resolution_time_h = random.uniform(
+                    sla["resolution_hours"] * 0.3,
+                    sla["resolution_hours"] * 1.8
+                )
+                resolved_at = created_at + timedelta(hours=resolution_time_h)
+                sla_met = resolution_time_h <= sla["resolution_hours"]
+
+            titles = self.TICKET_TITLES.get(category, ["Solicitação genérica"])
+            title = random.choice(titles)
+
+            tickets.append({
+                "id": f"TKT-{str(i).zfill(4)}",
+                "title": title,
+                "category": category,
+                "priority": priority,
+                "status": status,
+                "requester": requester,
+                "agent": agent["name"],
+                "agent_team": agent["team"],
+                "created_at": created_at.isoformat(),
+                "responded_at": responded_at.isoformat(),
+                "resolved_at": resolved_at.isoformat() if resolved_at else None,
+                "response_time_hours": round(response_time_h, 2),
+                "resolution_time_hours": round(resolution_time_h, 2) if resolution_time_h else None,
+                "sla_response_limit": sla["response_hours"],
+                "sla_resolution_limit": sla["resolution_hours"],
+                "sla_met": sla_met,
+                "satisfaction_score": random.choice([1,2,3,4,5,None,None]) if status == "Fechado" else None,
+                "reopen_count": random.choice([0,0,0,0,1,1,2]),
+            })
+
+        return tickets
+
+    def generate_projects(self, n: int = 12) -> list:
+        projects = []
+        now = datetime.now()
+        random.seed(99)
+
+        for i, name in enumerate(self.PROJECT_NAMES[:n], 1):
+            status = random.choice(self.STATUSES_PROJECT)
+            start = now - timedelta(days=random.randint(30, 180))
+            end_planned = start + timedelta(days=random.randint(30, 120))
+            progress = {
+                "Planejamento": random.randint(5, 15),
+                "Em Execução": random.randint(20, 75),
+                "Em Revisão": random.randint(80, 95),
+                "Concluído": 100,
+                "Pausado": random.randint(10, 60),
+            }[status]
+
+            budget_planned = random.choice([50000, 80000, 120000, 200000, 350000])
+            budget_used = round(budget_planned * random.uniform(0.3, 1.2), 2)
+
+            projects.append({
+                "id": f"PRJ-{str(i).zfill(3)}",
+                "name": name,
+                "status": status,
+                "priority": random.choice(["Alta", "Média", "Baixa"]),
+                "manager": random.choice(self.AGENTS)["name"],
+                "team_size": random.randint(2, 8),
+                "progress_pct": progress,
+                "start_date": start.strftime("%Y-%m-%d"),
+                "end_date_planned": end_planned.strftime("%Y-%m-%d"),
+                "end_date_actual": (end_planned + timedelta(days=random.randint(-10,30))).strftime("%Y-%m-%d") if status == "Concluído" else None,
+                "budget_planned": budget_planned,
+                "budget_used": budget_used,
+                "budget_variance_pct": round((budget_used / budget_planned - 1) * 100, 1),
+                "tasks_total": random.randint(10, 50),
+                "tasks_done": int(random.randint(10, 50) * progress / 100),
+                "risks": random.choice(["Baixo", "Médio", "Alto"]),
+                "category": random.choice(["Infraestrutura", "Segurança", "Software", "Cloud"]),
+            })
+
+        return projects
+
+    def generate_sla_report(self, period_days: int = 30) -> dict:
+        random.seed(7)
+        by_priority = {}
+        for p in self.PRIORITIES:
+            total = random.randint(20, 80)
+            met = int(total * random.uniform(0.70, 0.98))
+            by_priority[p] = {
+                "total": total,
+                "met": met,
+                "breached": total - met,
+                "compliance_pct": round(met / total * 100, 1),
+                "avg_resolution_hours": round(random.uniform(
+                    self.SLA_BY_PRIORITY[p]["resolution_hours"] * 0.6,
+                    self.SLA_BY_PRIORITY[p]["resolution_hours"] * 1.2
+                ), 1),
+            }
+
+        total_all = sum(v["total"] for v in by_priority.values())
+        met_all = sum(v["met"] for v in by_priority.values())
+
+        by_category = {}
+        for cat in self.CATEGORIES:
+            total = random.randint(5, 30)
+            met = int(total * random.uniform(0.65, 0.99))
+            by_category[cat] = {
+                "total": total,
+                "met": met,
+                "compliance_pct": round(met / total * 100, 1),
+            }
+
+        return {
+            "period_days": period_days,
+            "generated_at": datetime.now().isoformat(),
+            "overall": {
+                "total_tickets": total_all,
+                "sla_met": met_all,
+                "sla_breached": total_all - met_all,
+                "compliance_pct": round(met_all / total_all * 100, 1),
+            },
+            "by_priority": by_priority,
+            "by_category": by_category,
+        }
+
+    def generate_kpis(self) -> dict:
+        random.seed(13)
+        return {
+            "generated_at": datetime.now().isoformat(),
+            "tickets": {
+                "total_open": random.randint(40, 80),
+                "total_in_progress": random.randint(20, 40),
+                "total_resolved_today": random.randint(5, 20),
+                "total_resolved_month": random.randint(150, 300),
+                "avg_resolution_hours": round(random.uniform(8, 24), 1),
+                "avg_satisfaction": round(random.uniform(3.5, 4.8), 2),
+                "reopen_rate_pct": round(random.uniform(2, 10), 1),
+                "first_contact_resolution_pct": round(random.uniform(55, 80), 1),
+            },
+            "projects": {
+                "total_active": random.randint(5, 10),
+                "total_completed": random.randint(3, 8),
+                "total_delayed": random.randint(1, 4),
+                "avg_progress_pct": round(random.uniform(45, 75), 1),
+                "budget_adherence_pct": round(random.uniform(75, 95), 1),
+                "on_time_delivery_pct": round(random.uniform(60, 85), 1),
+            },
+            "sla": {
+                "overall_compliance_pct": round(random.uniform(78, 95), 1),
+                "critical_compliance_pct": round(random.uniform(85, 99), 1),
+                "high_compliance_pct": round(random.uniform(78, 95), 1),
+            },
+            "team": {
+                "total_agents": len(MockDataGenerator.AGENTS),
+                "avg_tickets_per_agent": round(random.uniform(8, 20), 1),
+                "busiest_agent": "Carlos Silva",
+                "top_category": "Acesso e Permissões",
+            }
+        }
