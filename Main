@@ -1,0 +1,107 @@
+"""
+sensr.IT ITSM Intelligence — Main
+Pipeline completo: API → Processamento → IA → Dashboard.
+"""
+
+import sys
+import logging
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s → %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger("Main")
+
+from api.sensr_client import SensrAPIClient
+from agents.itsm_agent import load_data, get_itsm_tools
+from core.processor import ITSMDataProcessor
+from core.dashboard_generator import DashboardGenerator
+
+
+def run_ai_analysis(tickets, projects, sla, kpis) -> dict:
+    """Executa análise IA com LangChain tools."""
+    load_data(tickets, projects, sla, kpis)
+    tools = get_itsm_tools()
+    tool_map = {t.name: t for t in tools}
+
+    results = {}
+    logger.info("[Main] 🤖 Iniciando análise com agente LangChain...")
+
+    results["tickets"] = __import__("json").loads(
+        tool_map["analyze_tickets"]._run(focus="all")
+    )
+    results["projects"] = __import__("json").loads(
+        tool_map["analyze_projects"]._run(focus="all")
+    )
+    results["sla"] = __import__("json").loads(
+        tool_map["analyze_sla"]._run(threshold=90.0)
+    )
+    results["recommendations"] = __import__("json").loads(
+        tool_map["generate_recommendations"]._run(area="all")
+    )
+
+    logger.info(f"[Main] ✅ IA concluída | {results['recommendations']['total_recommendations']} recomendações")
+    return results
+
+
+def main():
+    print("""
+╔══════════════════════════════════════════════════════╗
+║       sensr.IT — ITSM Intelligence Dashboard         ║
+║  🦜 LangChain AI  |  📊 HTML/JS  |  🔌 sensr.IT API ║
+║  Service · Projetos · SLA · KPIs Gerenciais          ║
+╚══════════════════════════════════════════════════════╝
+    """)
+
+    # 1. Coleta dados via API
+    logger.info("[Main] 🔌 Conectando à API sensr.IT...")
+    client = SensrAPIClient(mock=True)
+
+    tickets = client.get_tickets(limit=200)
+    projects = client.get_projects(limit=12)
+    sla = client.get_sla_report(period_days=30)
+    kpis = client.get_kpis()
+
+    logger.info(f"[Main] ✅ API: {len(tickets)} tickets | {len(projects)} projetos")
+
+    # 2. Processa dados
+    logger.info("[Main] ⚙️ Processando dados...")
+    processor = ITSMDataProcessor()
+    data = processor.process_all(tickets, projects, sla, kpis)
+
+    # 3. Análise IA com LangChain
+    ai_insights = run_ai_analysis(tickets, projects, sla, kpis)
+
+    # 4. Gera dashboard
+    logger.info("[Main] 🎨 Gerando dashboard HTML/JS...")
+    generator = DashboardGenerator(output_dir="dashboard")
+    path = generator.generate(data, ai_insights)
+
+    # 5. Resumo
+    t = data["tickets"]
+    p = data["projects"]
+    s = data["sla"]
+    recs = ai_insights["recommendations"]
+
+    print(f"""
+📊 RESUMO DA EXECUÇÃO:
+   Tickets analisados   : {t['total']:,}
+   Tickets em aberto    : {t['open']}
+   Tickets críticos     : {t['critical_open']}
+   Projetos ativos      : {p['active']}
+   Projetos em risco    : {p['at_risk']}
+   SLA geral            : {s['overall']['compliance_pct']}%
+   Recomendações IA     : {recs['total_recommendations']}
+   Dashboard gerado     : {path}
+
+✅ Pipeline concluído com sucesso!
+🌐 Abra '{path}' no navegador para visualizar o dashboard.
+    """)
+
+
+if __name__ == "__main__":
+    main()
