@@ -1,0 +1,138 @@
+"""
+sensr.IT — Data Processor
+Processa e consolida dados brutos da API para o dashboard.
+"""
+
+import json
+import logging
+from datetime import datetime
+from collections import defaultdict
+
+logger = logging.getLogger("DataProcessor")
+
+
+class ITSMDataProcessor:
+    """
+    Processa dados brutos da API sensr.IT.
+    Prepara estruturas otimizadas para o dashboard HTML/JS.
+    """
+
+    def __init__(self):
+        self.processed = {}
+        logger.info("[DataProcessor] Inicializado")
+
+    def process_all(self, tickets: list, projects: list, sla: dict, kpis: dict) -> dict:
+        logger.info(f"[DataProcessor] Processando {len(tickets)} tickets | {len(projects)} projetos")
+
+        self.processed = {
+            "generated_at": datetime.now().isoformat(),
+            "tickets": self._process_tickets(tickets),
+            "projects": self._process_projects(projects),
+            "sla": self._process_sla(sla),
+            "kpis": kpis,
+            "timeline": self._build_timeline(tickets),
+        }
+        logger.info("[DataProcessor] ✅ Processamento concluído")
+        return self.processed
+
+    def _process_tickets(self, tickets: list) -> dict:
+        total = len(tickets)
+        by_status = defaultdict(int)
+        by_priority = defaultdict(int)
+        by_category = defaultdict(int)
+        by_agent = defaultdict(int)
+        by_team = defaultdict(int)
+
+        resolution_times = []
+        satisfaction_scores = []
+        reopen_total = 0
+
+        for t in tickets:
+            by_status[t["status"]] += 1
+            by_priority[t["priority"]] += 1
+            by_category[t["category"]] += 1
+            by_agent[t["agent"]] += 1
+            by_team[t["agent_team"]] += 1
+            reopen_total += t.get("reopen_count", 0)
+
+            if t.get("resolution_time_hours"):
+                resolution_times.append(t["resolution_time_hours"])
+            if t.get("satisfaction_score"):
+                satisfaction_scores.append(t["satisfaction_score"])
+
+        open_count = by_status.get("Aberto", 0) + by_status.get("Em Andamento", 0)
+
+        return {
+            "total": total,
+            "open": open_count,
+            "resolved": by_status.get("Resolvido", 0) + by_status.get("Fechado", 0),
+            "awaiting": by_status.get("Aguardando Usuário", 0),
+            "critical_open": sum(1 for t in tickets if t["priority"] == "Crítica" and t["status"] in ["Aberto","Em Andamento"]),
+            "avg_resolution_hours": round(sum(resolution_times) / len(resolution_times), 1) if resolution_times else 0,
+            "avg_satisfaction": round(sum(satisfaction_scores) / len(satisfaction_scores), 2) if satisfaction_scores else 0,
+            "reopen_rate_pct": round(reopen_total / total * 100, 1),
+            "by_status": dict(by_status),
+            "by_priority": dict(by_priority),
+            "by_category": dict(sorted(by_category.items(), key=lambda x: -x[1])),
+            "by_agent": dict(sorted(by_agent.items(), key=lambda x: -x[1])),
+            "by_team": dict(by_team),
+            "top_category": max(by_category, key=by_category.get),
+            "busiest_agent": max(by_agent, key=by_agent.get),
+            "raw": tickets[:50],  # Amostra para tabela do dashboard
+        }
+
+    def _process_projects(self, projects: list) -> dict:
+        total = len(projects)
+        by_status = defaultdict(int)
+        by_risk = defaultdict(int)
+
+        for p in projects:
+            by_status[p["status"]] += 1
+            by_risk[p["risks"]] += 1
+
+        total_budget = sum(p["budget_planned"] for p in projects)
+        total_used = sum(p["budget_used"] for p in projects)
+        avg_progress = round(sum(p["progress_pct"] for p in projects) / total, 1)
+
+        return {
+            "total": total,
+            "active": by_status.get("Em Execução", 0),
+            "completed": by_status.get("Concluído", 0),
+            "planning": by_status.get("Planejamento", 0),
+            "paused": by_status.get("Pausado", 0),
+            "at_risk": by_risk.get("Alto", 0),
+            "over_budget": sum(1 for p in projects if p["budget_used"] > p["budget_planned"]),
+            "avg_progress_pct": avg_progress,
+            "total_budget_planned": total_budget,
+            "total_budget_used": round(total_used, 2),
+            "budget_variance_pct": round((total_used / total_budget - 1) * 100, 1),
+            "by_status": dict(by_status),
+            "by_risk": dict(by_risk),
+            "raw": projects,
+        }
+
+    def _process_sla(self, sla: dict) -> dict:
+        return sla
+
+    def _build_timeline(self, tickets: list) -> dict:
+        """Agrupa tickets por dia para gráfico de linha."""
+        by_day = defaultdict(int)
+        by_day_resolved = defaultdict(int)
+
+        for t in tickets:
+            day = t["created_at"][:10]
+            by_day[day] += 1
+            if t.get("resolved_at"):
+                day_r = t["resolved_at"][:10]
+                by_day_resolved[day_r] += 1
+
+        all_days = sorted(set(list(by_day.keys()) + list(by_day_resolved.keys())))[-14:]
+
+        return {
+            "labels": all_days,
+            "created": [by_day.get(d, 0) for d in all_days],
+            "resolved": [by_day_resolved.get(d, 0) for d in all_days],
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.processed, ensure_ascii=False, indent=2)
