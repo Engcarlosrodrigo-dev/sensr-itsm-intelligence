@@ -1,0 +1,387 @@
+"""
+sensr.IT — Agente de Análise com LangChain
+Analisa dados do ITSM e gera insights automáticos usando ReAct + BaseTool.
+"""
+
+import json
+import logging
+from typing import Type
+from langchain.tools import BaseTool
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
+from langchain_core.language_models import BaseLLM
+from langchain_core.outputs import LLMResult, Generation
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger("ITSMAgent")
+
+# ─────────────────────────────────────────────
+# SCHEMAS
+# ─────────────────────────────────────────────
+
+class AnalyzeTicketsInput(BaseModel):
+    focus: str = Field(default="all", description="Foco: all | sla | priority | category | team")
+
+class AnalyzeProjectsInput(BaseModel):
+    focus: str = Field(default="all", description="Foco: all | budget | delay | progress")
+
+class AnalyzeSLAInput(BaseModel):
+    threshold: float = Field(default=90.0, description="Meta de SLA em %")
+
+class GenerateRecommendationsInput(BaseModel):
+    area: str = Field(default="all", description="Área: all | tickets | projects | sla | team")
+
+
+# ─────────────────────────────────────────────
+# ESTADO COMPARTILHADO
+# ─────────────────────────────────────────────
+_ITSM_DATA: dict = {}
+
+
+def load_data(tickets: list, projects: list, sla: dict, kpis: dict):
+    """Carrega dados da API no estado do agente."""
+    _ITSM_DATA["tickets"] = tickets
+    _ITSM_DATA["projects"] = projects
+    _ITSM_DATA["sla"] = sla
+    _ITSM_DATA["kpis"] = kpis
+    logger.info(f"[ITSMAgent] Dados carregados: {len(tickets)} tickets | {len(projects)} projetos")
+
+
+# ─────────────────────────────────────────────
+# FERRAMENTAS LANGCHAIN
+# ─────────────────────────────────────────────
+
+class AnalyzeTicketsTool(BaseTool):
+    name: str = "analyze_tickets"
+    description: str = (
+        "Analisa os chamados de suporte do ITSM. "
+        "Calcula distribuição por status, prioridade, categoria e agente. "
+        "Identifica gargalos e padrões de tickets."
+    )
+    args_schema: Type[BaseModel] = AnalyzeTicketsInput
+
+    def _run(self, focus: str = "all") -> str:
+        tickets = _ITSM_DATA.get("tickets", [])
+        if not tickets:
+            return json.dumps({"error": "Nenhum dado de ticket disponível."})
+
+        total = len(tickets)
+        by_status = {}
+        by_priority = {}
+        by_category = {}
+        by_agent = {}
+
+        for t in tickets:
+            by_status[t["status"]] = by_status.get(t["status"], 0) + 1
+            by_priority[t["priority"]] = by_priority.get(t["priority"], 0) + 1
+            by_category[t["category"]] = by_category.get(t["category"], 0) + 1
+            by_agent[t["agent"]] = by_agent.get(t["agent"], 0) + 1
+
+        open_tickets = by_status.get("Aberto", 0) + by_status.get("Em Andamento", 0)
+        critical = by_priority.get("Crítica", 0)
+        top_category = max(by_category, key=by_category.get)
+        busiest_agent = max(by_agent, key=by_agent.get)
+
+        resolved = [t for t in tickets if t["resolution_time_hours"]]
+        avg_resolution = round(sum(t["resolution_time_hours"] for t in resolved) / len(resolved), 1) if resolved else 0
+
+        satisfied = [t for t in tickets if t.get("satisfaction_score")]
+        avg_satisfaction = round(sum(t["satisfaction_score"] for t in satisfied) / len(satisfied), 2) if satisfied else 0
+
+        insights = []
+        if critical > 5:
+            insights.append(f"⚠️ {critical} tickets críticos em aberto — requer atenção imediata")
+        if open_tickets / total > 0.4:
+            insights.append(f"📈 {round(open_tickets/total*100,1)}% dos tickets ainda abertos — backlog elevado")
+        insights.append(f"🏆 Categoria mais demandada: {top_category} ({by_category[top_category]} tickets)")
+        insights.append(f"👤 Agente mais acionado: {busiest_agent} ({by_agent[busiest_agent]} tickets)")
+        insights.append(f"⏱️ Tempo médio de resolução: {avg_resolution}h")
+        if avg_satisfaction > 0:
+            insights.append(f"⭐ Satisfação média: {avg_satisfaction}/5.0")
+
+        result = {
+            "total_tickets": total,
+            "open_tickets": open_tickets,
+            "critical_tickets": critical,
+            "avg_resolution_hours": avg_resolution,
+            "avg_satisfaction": avg_satisfaction,
+            "by_status": by_status,
+            "by_priority": by_priority,
+            "by_category": by_category,
+            "by_agent": by_agent,
+            "top_category": top_category,
+            "busiest_agent": busiest_agent,
+            "insights": insights,
+        }
+        logger.info(f"[AnalyzeTicketsTool] ✅ {total} tickets analisados | {len(insights)} insights")
+        return json.dumps(result, indent=2, ensure_ascii=False)
+
+    async def _arun(self, *args, **kwargs): raise NotImplementedError
+
+
+class AnalyzeProjectsTool(BaseTool):
+    name: str = "analyze_projects"
+    description: str = (
+        "Analisa projetos do ITSM. "
+        "Verifica progresso, orçamento, atrasos e riscos. "
+        "Identifica projetos em risco e desvios de budget."
+    )
+    args_schema: Type[BaseModel] = AnalyzeProjectsInput
+
+    def _run(self, focus: str = "all") -> str:
+        projects = _ITSM_DATA.get("projects", [])
+        if not projects:
+            return json.dumps({"error": "Nenhum dado de projeto disponível."})
+
+        total = len(projects)
+        active = [p for p in projects if p["status"] == "Em Execução"]
+        completed = [p for p in projects if p["status"] == "Concluído"]
+        delayed = [p for p in projects if p["budget_variance_pct"] > 10]
+        at_risk = [p for p in projects if p["risks"] == "Alto"]
+
+        avg_progress = round(sum(p["progress_pct"] for p in projects) / total, 1)
+        over_budget = [p for p in projects if p["budget_used"] > p["budget_planned"]]
+        total_budget = sum(p["budget_planned"] for p in projects)
+        total_used = sum(p["budget_used"] for p in projects)
+        budget_variance = round((total_used / total_budget - 1) * 100, 1)
+
+        insights = []
+        if len(at_risk) > 0:
+            names = ", ".join(p["name"][:25] for p in at_risk[:3])
+            insights.append(f"🔴 {len(at_risk)} projeto(s) com risco ALTO: {names}")
+        if len(over_budget) > 0:
+            insights.append(f"💸 {len(over_budget)} projeto(s) acima do orçamento planejado")
+        if budget_variance > 0:
+            insights.append(f"📊 Orçamento total com desvio de +{budget_variance}% acima do planejado")
+        else:
+            insights.append(f"✅ Orçamento total dentro do planejado ({budget_variance}%)")
+        insights.append(f"📈 Progresso médio dos projetos: {avg_progress}%")
+        insights.append(f"✅ {len(completed)} projeto(s) concluído(s) | {len(active)} em execução")
+
+        result = {
+            "total_projects": total,
+            "active": len(active),
+            "completed": len(completed),
+            "at_risk": len(at_risk),
+            "over_budget_count": len(over_budget),
+            "avg_progress_pct": avg_progress,
+            "total_budget_planned": total_budget,
+            "total_budget_used": round(total_used, 2),
+            "budget_variance_pct": budget_variance,
+            "by_status": {s: sum(1 for p in projects if p["status"] == s) for s in set(p["status"] for p in projects)},
+            "by_risk": {r: sum(1 for p in projects if p["risks"] == r) for r in ["Baixo","Médio","Alto"]},
+            "insights": insights,
+        }
+        logger.info(f"[AnalyzeProjectsTool] ✅ {total} projetos analisados | {len(at_risk)} em risco")
+        return json.dumps(result, indent=2, ensure_ascii=False)
+
+    async def _arun(self, *args, **kwargs): raise NotImplementedError
+
+
+class AnalyzeSLATool(BaseTool):
+    name: str = "analyze_sla"
+    description: str = (
+        "Analisa conformidade de SLA do ITSM por prioridade e categoria. "
+        "Identifica violações e gera alertas para prioridades críticas."
+    )
+    args_schema: Type[BaseModel] = AnalyzeSLAInput
+
+    def _run(self, threshold: float = 90.0) -> str:
+        sla = _ITSM_DATA.get("sla", {})
+        if not sla:
+            return json.dumps({"error": "Nenhum dado de SLA disponível."})
+
+        overall = sla.get("overall", {})
+        by_priority = sla.get("by_priority", {})
+        by_category = sla.get("by_category", {})
+
+        compliance = overall.get("compliance_pct", 0)
+        violations = [(p, v) for p, v in by_priority.items() if v["compliance_pct"] < threshold]
+        worst_category = min(by_category.items(), key=lambda x: x[1]["compliance_pct"])
+        best_category = max(by_category.items(), key=lambda x: x[1]["compliance_pct"])
+
+        insights = []
+        if compliance < threshold:
+            insights.append(f"🚨 SLA geral ({compliance}%) abaixo da meta de {threshold}%")
+        else:
+            insights.append(f"✅ SLA geral ({compliance}%) acima da meta de {threshold}%")
+        for p, v in violations:
+            insights.append(f"⚠️ SLA de prioridade '{p}': {v['compliance_pct']}% — abaixo da meta")
+        insights.append(f"📉 Categoria com pior SLA: {worst_category[0]} ({worst_category[1]['compliance_pct']}%)")
+        insights.append(f"🏆 Categoria com melhor SLA: {best_category[0]} ({best_category[1]['compliance_pct']}%)")
+        insights.append(f"🎫 Total de tickets no período: {overall.get('total_tickets', 0)}")
+
+        result = {
+            "overall_compliance_pct": compliance,
+            "target_pct": threshold,
+            "meeting_target": compliance >= threshold,
+            "sla_breached": overall.get("sla_breached", 0),
+            "by_priority": by_priority,
+            "worst_category": worst_category[0],
+            "best_category": best_category[0],
+            "violations_count": len(violations),
+            "insights": insights,
+        }
+        logger.info(f"[AnalyzeSLATool] ✅ SLA geral: {compliance}% | {len(violations)} violações")
+        return json.dumps(result, indent=2, ensure_ascii=False)
+
+    async def _arun(self, *args, **kwargs): raise NotImplementedError
+
+
+class GenerateRecommendationsTool(BaseTool):
+    name: str = "generate_recommendations"
+    description: str = (
+        "Gera recomendações estratégicas baseadas em todos os dados do ITSM. "
+        "Consolida insights de tickets, projetos e SLA em ações priorizadas."
+    )
+    args_schema: Type[BaseModel] = GenerateRecommendationsInput
+
+    def _run(self, area: str = "all") -> str:
+        tickets = _ITSM_DATA.get("tickets", [])
+        projects = _ITSM_DATA.get("projects", [])
+        sla = _ITSM_DATA.get("sla", {})
+        kpis = _ITSM_DATA.get("kpis", {})
+
+        recommendations = []
+
+        # Análise de tickets
+        critical = sum(1 for t in tickets if t["priority"] == "Crítica" and t["status"] in ["Aberto","Em Andamento"])
+        if critical > 3:
+            recommendations.append({
+                "priority": "URGENTE",
+                "area": "Tickets",
+                "action": f"Escalar {critical} tickets críticos para N3 imediatamente",
+                "impact": "Alto",
+            })
+
+        top_cat = max(set(t["category"] for t in tickets), key=lambda c: sum(1 for t in tickets if t["category"] == c))
+        recommendations.append({
+            "priority": "ALTA",
+            "area": "Capacitação",
+            "action": f"Criar base de conhecimento para categoria '{top_cat}' — maior volume de chamados",
+            "impact": "Médio",
+        })
+
+        # Análise de SLA
+        overall_sla = sla.get("overall", {}).get("compliance_pct", 0)
+        if overall_sla < 90:
+            recommendations.append({
+                "priority": "ALTA",
+                "area": "SLA",
+                "action": f"Revisar processos de atendimento — SLA em {overall_sla}% (meta: 90%)",
+                "impact": "Alto",
+            })
+
+        # Análise de projetos
+        over_budget = sum(1 for p in projects if p["budget_used"] > p["budget_planned"])
+        if over_budget > 0:
+            recommendations.append({
+                "priority": "MÉDIA",
+                "area": "Projetos",
+                "action": f"Revisar orçamento de {over_budget} projeto(s) acima do planejado",
+                "impact": "Médio",
+            })
+
+        at_risk = [p for p in projects if p["risks"] == "Alto"]
+        if at_risk:
+            recommendations.append({
+                "priority": "ALTA",
+                "area": "Projetos",
+                "action": f"Implementar plano de mitigação para {len(at_risk)} projeto(s) de alto risco",
+                "impact": "Alto",
+            })
+
+        recommendations.append({
+            "priority": "BAIXA",
+            "area": "Automação",
+            "action": "Implementar automação para tickets repetitivos de senha e acesso",
+            "impact": "Médio",
+        })
+
+        result = {
+            "generated_at": __import__("datetime").datetime.now().isoformat(),
+            "total_recommendations": len(recommendations),
+            "urgent": sum(1 for r in recommendations if r["priority"] == "URGENTE"),
+            "high": sum(1 for r in recommendations if r["priority"] == "ALTA"),
+            "medium": sum(1 for r in recommendations if r["priority"] == "MÉDIA"),
+            "recommendations": recommendations,
+        }
+        logger.info(f"[GenerateRecommendationsTool] ✅ {len(recommendations)} recomendações geradas")
+        return json.dumps(result, indent=2, ensure_ascii=False)
+
+    async def _arun(self, *args, **kwargs): raise NotImplementedError
+
+
+# ─────────────────────────────────────────────
+# MOCK LLM
+# ─────────────────────────────────────────────
+
+class MockLLM(BaseLLM):
+    @property
+    def _llm_type(self) -> str:
+        return "mock_llm"
+
+    def _generate(self, prompts, stop=None, run_manager=None, **kwargs) -> LLMResult:
+        text = prompts[0].lower() if prompts else ""
+        if "ticket" in text or "chamado" in text:
+            action = 'Action: analyze_tickets\nAction Input: {"focus": "all"}'
+        elif "project" in text or "projeto" in text:
+            action = 'Action: analyze_projects\nAction Input: {"focus": "all"}'
+        elif "sla" in text:
+            action = 'Action: analyze_sla\nAction Input: {"threshold": 90.0}'
+        else:
+            action = 'Action: generate_recommendations\nAction Input: {"area": "all"}'
+        return LLMResult(generations=[[Generation(text=action)]])
+
+    async def _agenerate(self, prompts, stop=None, run_manager=None, **kwargs) -> LLMResult:
+        return self._generate(prompts, stop, run_manager, **kwargs)
+
+
+# ─────────────────────────────────────────────
+# AGENTE ITSM
+# ─────────────────────────────────────────────
+
+ITSM_PROMPT = PromptTemplate.from_template("""
+Você é o ITSMAnalystAgent, especialista em análise de dados de ITSM da plataforma sensr.IT.
+Sua missão é analisar tickets de suporte, projetos, SLA e KPIs gerenciais, gerando insights e recomendações estratégicas.
+
+Ferramentas disponíveis:
+{tools}
+
+Nomes das ferramentas: {tool_names}
+
+Tarefa: {input}
+
+Raciocínio (formato ReAct):
+{agent_scratchpad}
+""")
+
+
+def build_itsm_agent(llm: BaseLLM = None) -> AgentExecutor:
+    llm = llm or MockLLM()
+    tools = [
+        AnalyzeTicketsTool(),
+        AnalyzeProjectsTool(),
+        AnalyzeSLATool(),
+        GenerateRecommendationsTool(),
+    ]
+    agent = create_react_agent(llm=llm, tools=tools, prompt=ITSM_PROMPT)
+    executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=True,
+        handle_parsing_errors=True,
+        max_iterations=5,
+        return_intermediate_steps=True,
+    )
+    logger.info(f"[ITSMAgent] ✅ Agente construído | {len(tools)} ferramentas")
+    return executor
+
+
+def get_itsm_tools():
+    return [
+        AnalyzeTicketsTool(),
+        AnalyzeProjectsTool(),
+        AnalyzeSLATool(),
+        GenerateRecommendationsTool(),
+    ]
